@@ -23,6 +23,8 @@ export class DatabaseService implements Queryable, OnModuleInit, OnApplicationSh
 
   constructor(@Inject(ENV) env: Env) {
     this.pool = new Pool({ connectionString: env.DATABASE_URL, max: 10 });
+    // Without a listener, an idle client dropped by the server (restart, failover) crashes the process.
+    this.pool.on('error', (err) => this.logger.error(`Idle Postgres client error: ${err.message}`));
     this.queryable = wrap(this.pool);
   }
 
