@@ -20,6 +20,112 @@ flowchart LR
   AI[AI agent / Copilot] -- MCP stdio --> MCP[CDM MCP server] -- REST --> API[CDM API]
 ```
 
+## How it works
+
+### 1. Legend → HubSpot (outbound sync)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant AP as Affiliate platform
+  participant K as Kafka
+  participant IC as IngestionConsumer
+  participant PG as Postgres
+  participant SW as SyncWorker
+  participant HS as HubSpot
+
+  AP->>K: affiliate.upserted (key = affiliateId)
+  K->>IC: deliver message (at-least-once)
+  IC->>IC: validate with zod
+  alt invalid payload
+    IC->>K: publish to cdm.dead-letter.v1
+  else valid
+    rect rgb(235, 245, 255)
+      note over IC,PG: single transaction
+      IC->>PG: insert processed_events (stop if duplicate)
+      IC->>PG: upsert affiliates (stop if event is older)
+      IC->>PG: sync_state desired_version + 1, status = pending
+    end
+  end
+  IC-->>K: commit offset
+
+  loop every 500 ms
+    SW->>PG: claim due rows (FOR UPDATE SKIP LOCKED, 60 s lease)
+  end
+  SW->>PG: load latest affiliate state
+  SW->>HS: find-or-create company by legend_affiliate_id
+  SW->>PG: save hubspot_company_id
+  SW->>HS: find-or-create contact by email
+  SW->>PG: save hubspot_contact_id
+  SW->>HS: associate contact with company
+  alt success
+    SW->>PG: synced_version = v, status = synced
+  else 429 / 5xx / 409
+    SW->>PG: status = pending, retry in 2^n s (max 300 s)
+  else 4xx or max attempts reached
+    SW->>PG: status = failed, last_error saved
+  end
+```
+
+Deals follow the same path. The worker waits (retryable error) until the affiliate's HubSpot company exists, then creates the deal in the default pipeline and associates it with the company.
+
+### 2. HubSpot → Legend (inbound changes)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Rep as Sales rep
+  participant HS as HubSpot
+  participant WC as WebhookController
+  participant PG as Postgres
+  participant OR as OutboxRelay
+  participant K as Kafka
+  participant C as Legend consumers
+
+  Rep->>HS: move deal to closedwon
+  HS->>WC: POST /webhooks/hubspot with X-HubSpot-Signature-v3
+  WC->>WC: verify HMAC-SHA256 and timestamp within 5 min
+  alt invalid signature
+    WC-->>HS: 401
+  else valid
+    rect rgb(235, 245, 255)
+      note over WC,PG: single transaction
+      WC->>PG: insert processed_events hubspot-eventId (stop if duplicate)
+      WC->>PG: update deals.hubspot_stage
+      WC->>PG: insert outbox row
+    end
+    WC-->>HS: 204
+  end
+
+  loop every 500 ms
+    OR->>PG: lock unpublished outbox rows (SKIP LOCKED)
+    OR->>K: publish to cdm.hubspot-changes.v1 (key = dealId)
+    OR->>PG: set published_at
+  end
+  K->>C: hubspot.deal.stage-changed
+```
+
+### 3. Sync state lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending: event applied
+  pending --> in_flight: worker claims row
+  in_flight --> synced: HubSpot OK
+  in_flight --> pending: newer change arrived during sync
+  in_flight --> pending: retryable error, backoff
+  in_flight --> pending: lease expired (worker crashed)
+  in_flight --> failed: non-retryable or max attempts
+  synced --> pending: new event
+  failed --> pending: manual retry via API or MCP
+  note right of in_flight
+    Not a separate status value.
+    Row stays pending with locked_until set.
+  end note
+```
+
+Several events for one entity during an outage collapse into one HubSpot call. The worker always pushes the latest stored state, not each event.
+
 ## Quick start
 
 Requires Docker only.
