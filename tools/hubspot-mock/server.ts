@@ -50,6 +50,31 @@ const findConflict = (type: string, props: Record<string, string>, selfId?: stri
     (o) => o.id !== selfId && uniqueProperties(type).some((p) => props[p] && o.properties[p] === props[p]),
   );
 
+const BATCH_LIMIT = 100;
+const requestCounts = new Map<string, number>();
+
+function createObject(type: string, props: Record<string, string>): CrmObject {
+  const now = new Date().toISOString();
+  const obj: CrmObject = { id: String(nextObjectId++), properties: { ...props }, createdAt: now, updatedAt: now, archived: false };
+  store.get(type)!.set(obj.id, obj);
+  return obj;
+}
+
+function associate(from: string, fromId: string, to: string, toId: string): boolean {
+  if (!store.get(from)?.has(fromId) || !store.get(to)?.has(toId)) return false;
+  if (!associations.some((a) => a.from === from && a.fromId === fromId && a.to === to && a.toId === toId)) {
+    associations.push({ from, fromId, to, toId });
+  }
+  return true;
+}
+
+const batchError = (category: string, message: string, id: string) => ({
+  status: 'error',
+  category,
+  message,
+  context: { ids: [id] },
+});
+
 async function sendDealStageWebhook(dealId: string, stage: string): Promise<number> {
   const body = JSON.stringify([
     {
@@ -90,6 +115,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 
   // --- Mock control endpoints -------------------------------------------------------------
   if (path === '/__mock/health') return send(res, 200, { status: 'ok' });
+  if (path === '/__mock/stats') return send(res, 200, { requests: Object.fromEntries(requestCounts) });
   if (path === '/__mock/state') {
     return send(res, 200, {
       objects: Object.fromEntries([...store].map(([t, objs]) => [t, [...objs.values()]])),
@@ -108,6 +134,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 
   // --- HubSpot API ------------------------------------------------------------------------
+  const routeKey = `${method} ${path.replace(/\/\d+/g, '/{id}')}`;
+  requestCounts.set(routeKey, (requestCounts.get(routeKey) ?? 0) + 1);
   if (!req.headers.authorization?.startsWith('Bearer ')) {
     return error(res, 401, 'Authentication credentials not found.', 'INVALID_AUTHENTICATION');
   }
@@ -126,11 +154,69 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 
   if ((m = path.match(/^\/crm\/v4\/objects\/(\w+)\/(\d+)\/associations\/default\/(\w+)\/(\d+)$/)) && method === 'PUT') {
     const [, from, fromId, to, toId] = m;
-    if (!store.get(from)?.has(fromId) || !store.get(to)?.has(toId)) return error(res, 404, 'Object not found');
-    if (!associations.some((a) => a.from === from && a.fromId === fromId && a.to === to && a.toId === toId)) {
-      associations.push({ from, fromId, to, toId });
-    }
+    if (!associate(from, fromId, to, toId)) return error(res, 404, 'Object not found');
     return send(res, 200, { status: 'COMPLETE', results: [{ from: { id: fromId }, to: { id: toId } }] });
+  }
+
+  if (method === 'POST' && (m = path.match(/^\/crm\/v4\/associations\/(\w+)\/(\w+)\/batch\/associate\/default$/))) {
+    const [, from, to] = m;
+    const { inputs = [] } = await readJson(req);
+    if (inputs.length > BATCH_LIMIT) return error(res, 400, `Batch size ${inputs.length} exceeds ${BATCH_LIMIT}`);
+    const results: unknown[] = [];
+    const errors: unknown[] = [];
+    for (const input of inputs) {
+      if (associate(from, input.from.id, to, input.to.id)) results.push(input);
+      else errors.push(batchError('OBJECT_NOT_FOUND', 'Object not found', input.from.id));
+    }
+    return send(res, errors.length ? 207 : 200, { status: 'COMPLETE', results, errors });
+  }
+
+  if (method === 'POST' && (m = path.match(/^\/crm\/v3\/objects\/(\w+)\/batch\/(upsert|read|create|update)$/)) && store.has(m[1])) {
+    const [, type, op] = m;
+    const objects = store.get(type)!;
+    const body = await readJson(req);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inputs: Array<Record<string, any>> = body.inputs ?? [];
+    if (inputs.length > BATCH_LIMIT) return error(res, 400, `Batch size ${inputs.length} exceeds ${BATCH_LIMIT}`);
+    const findBy = (prop: string, value: string) => [...objects.values()].find((o) => o.properties[prop] === value);
+    const results: unknown[] = [];
+    const errors: unknown[] = [];
+
+    if (op === 'create') {
+      // Like HubSpot, a conflict fails the whole batch.
+      const conflict = inputs.map((i) => findConflict(type, i.properties ?? {})).find(Boolean);
+      if (conflict) return error(res, 409, `Object already exists. Existing ID: ${conflict.id}`, 'CONFLICT');
+      for (const i of inputs) results.push(createObject(type, i.properties ?? {}));
+      return send(res, 201, { status: 'COMPLETE', results });
+    }
+
+    for (const input of inputs) {
+      if (op === 'read') {
+        const obj = body.idProperty ? findBy(body.idProperty, input.id) : objects.get(input.id);
+        if (obj) results.push(obj);
+        else errors.push(batchError('OBJECT_NOT_FOUND', `Object ${input.id} not found`, input.id));
+      } else if (op === 'update') {
+        const obj = objects.get(input.id);
+        if (!obj) {
+          errors.push(batchError('OBJECT_NOT_FOUND', `Object ${input.id} not found`, input.id));
+          continue;
+        }
+        Object.assign(obj.properties, input.properties);
+        obj.updatedAt = new Date().toISOString();
+        results.push(obj);
+      } else {
+        const value = input.idProperty === 'email' ? String(input.id).toLowerCase() : input.id;
+        const existing = findBy(input.idProperty, value);
+        if (existing) {
+          Object.assign(existing.properties, input.properties, { [input.idProperty]: value });
+          existing.updatedAt = new Date().toISOString();
+          results.push({ ...existing, new: false });
+        } else {
+          results.push({ ...createObject(type, { ...input.properties, [input.idProperty]: value }), new: true });
+        }
+      }
+    }
+    return send(res, errors.length ? 207 : 200, { status: 'COMPLETE', results, errors });
   }
 
   if (!(m = path.match(/^\/crm\/v3\/objects\/(\w+)(?:\/(\w+))?$/)) || !store.has(m[1])) {
@@ -153,10 +239,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const { properties: props = {} } = await readJson(req);
     const conflict = findConflict(type, props);
     if (conflict) return error(res, 409, `Object already exists. Existing ID: ${conflict.id}`, 'CONFLICT');
-    const now = new Date().toISOString();
-    const obj: CrmObject = { id: String(nextObjectId++), properties: props, createdAt: now, updatedAt: now, archived: false };
-    objects.set(obj.id, obj);
-    return send(res, 201, obj);
+    return send(res, 201, createObject(type, props));
   }
 
   if (method === 'GET' && !sub) {

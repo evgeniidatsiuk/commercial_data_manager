@@ -79,6 +79,9 @@ services:
       HUBSPOT_ACCESS_TOKEN: ${HUBSPOT_ACCESS_TOKEN:-mock-token}
       HUBSPOT_CLIENT_SECRET: ${HUBSPOT_CLIENT_SECRET:-mock-client-secret}
       DEV_ENDPOINTS_ENABLED: "true"
+      # Traces, metrics and logs via OTLP. CDM works fine if otel-lgtm is not running.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4318
+      OTEL_SERVICE_NAME: commercial-data-manager
     ports: ["3000:3000"]
     depends_on:
       postgres:
@@ -93,3 +96,14 @@ services:
       timeout: 3s
       retries: 40
       start_period: 5s
+
+  # Grafana + Tempo (traces) + Prometheus (metrics) + Loki (logs) behind an OTel collector.
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3001:3000" # Grafana
+      - "4318:4318" # OTLP/HTTP
+      - "9090:9090" # Prometheus
+    volumes:
+      - ./observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/cdm.yaml:ro
+      - ./observability/grafana/dashboards:/otel-lgtm/cdm-dashboards:ro

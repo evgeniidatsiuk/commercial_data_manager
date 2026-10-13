@@ -156,3 +156,49 @@ describe('CDM round trip: Kafka -> Postgres -> HubSpot -> webhook -> Kafka', () 
     expect(res.status).toBe(401);
   });
 });
+
+describe('Backfill through HubSpot batch APIs', () => {
+  const AFFILIATES = 150;
+
+  const syncStatus = async (path: string) => (await http('GET', `${CDM}${path}`)).body?.sync;
+
+  it('drains a burst of seeded affiliates + deals', async () => {
+    const seeded = await http('POST', `${CDM}/dev/seed`, { affiliates: AFFILIATES, dealsPerAffiliate: 1 });
+    expect(seeded.status).toBe(202);
+    const { prefix } = seeded.body;
+
+    for (const path of [`/affiliates/${prefix}-aff-0`, `/deals/${prefix}-deal-${AFFILIATES - 1}-0`]) {
+      await eventually(async () => ((await syncStatus(path))?.status === 'synced' ? true : undefined), path, 90_000);
+    }
+    // Deals that raced ahead of their affiliate are retried with backoff; wait for a quiet system.
+    await eventually(
+      async () => ((await http('GET', `${CDM}/sync/stats`)).body.totals.pending === 0 ? true : undefined),
+      'backlog drained',
+      90_000,
+    );
+  });
+
+  it('re-pushes every affiliate with a fraction of the API calls of per-record sync', async () => {
+    const before = (await http('GET', `${MOCK}/__mock/stats`)).body.requests;
+    const resync = await http('POST', `${CDM}/sync/resync`, { entityType: 'affiliate' });
+    expect(resync.status).toBe(202);
+    const requested: number = resync.body.requested;
+    expect(requested).toBeGreaterThanOrEqual(AFFILIATES);
+
+    await eventually(async () => {
+      const stats = (await http('GET', `${CDM}/sync/stats`)).body;
+      return stats.byEntityType.affiliate.pending === 0 ? stats : undefined;
+    }, 'affiliate resync drained', 90_000);
+
+    const after = (await http('GET', `${MOCK}/__mock/stats`)).body.requests;
+    const delta = (key: string) => (after[key] ?? 0) - (before[key] ?? 0);
+    const totalCalls = Object.keys(after)
+      .filter((key) => !key.includes('deals'))
+      .reduce((sum, key) => sum + delta(key), 0);
+
+    expect(delta('POST /crm/v3/objects/companies/batch/upsert')).toBeGreaterThanOrEqual(Math.ceil(requested / 100));
+    expect(delta('POST /crm/v3/objects/contacts/batch/upsert')).toBeGreaterThanOrEqual(1);
+    // Per-record sync would need ~4 calls per affiliate (search/update company + contact, associate).
+    expect(totalCalls).toBeLessThan(requested / 2);
+  });
+});
