@@ -3,6 +3,7 @@ import { ENV, type Env } from '../config/env';
 import { affiliateUpsertedSchema, dealUpsertedSchema, type InboundEvent } from '../contracts/events';
 import { Topics } from '../contracts/topics';
 import { type InboundMessage, KafkaService } from '../kafka/kafka.service';
+import { cdmMetrics } from '../observability/metrics';
 import { IngestionService } from './ingestion.service';
 
 const schemaByTopic = {
@@ -31,6 +32,7 @@ export class IngestionConsumer implements OnApplicationBootstrap {
     if (!parsed.ok) {
       // Poison messages go to the DLQ instead of blocking the partition.
       this.logger.warn(`Dead-lettering ${msg.topic}[${msg.partition}]@${msg.offset}: ${parsed.reason}`);
+      cdmMetrics.eventsIngested.add(1, { topic: msg.topic, result: 'dead_lettered' });
       await this.kafka.send([
         {
           topic: Topics.DeadLetter,
@@ -50,6 +52,7 @@ export class IngestionConsumer implements OnApplicationBootstrap {
 
     // Infrastructure errors (DB down) propagate so kafkajs retries without committing the offset.
     const result = await this.ingestion.apply(parsed.event);
+    cdmMetrics.eventsIngested.add(1, { topic: msg.topic, result });
     this.logger.log(`${parsed.event.type} ${parsed.event.eventId}: ${result}`);
   }
 

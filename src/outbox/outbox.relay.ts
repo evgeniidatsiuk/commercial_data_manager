@@ -1,6 +1,7 @@
 import { BeforeApplicationShutdown, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { PollingLoop } from '../common/polling-loop';
 import { KafkaService } from '../kafka/kafka.service';
+import { cdmMetrics } from '../observability/metrics';
 import { DatabaseService } from '../persistence/database.service';
 import { OutboxRepository } from '../persistence/outbox.repository';
 
@@ -39,6 +40,7 @@ export class OutboxRelay implements OnApplicationBootstrap, BeforeApplicationShu
         tx,
         rows.map((r) => r.id),
       );
+      cdmMetrics.outboxPublished.add(rows.length);
       this.logger.log(`Published ${rows.length} outbox message(s)`);
       return rows.length;
     });

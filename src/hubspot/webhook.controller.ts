@@ -12,6 +12,7 @@ import {
 import type { Request } from 'express';
 import { ENV, type Env } from '../config/env';
 import { hubspotWebhookPayloadSchema } from '../contracts/events';
+import { cdmMetrics } from '../observability/metrics';
 import { verifyHubSpotV3 } from './webhook-signature';
 import { WebhookService } from './webhook.service';
 
@@ -37,7 +38,10 @@ export class WebhookController {
       timestamp,
       signature,
     });
-    if (!valid) throw new UnauthorizedException('Invalid HubSpot signature');
+    if (!valid) {
+      cdmMetrics.webhookEvents.add(1, { subscription_type: 'unknown', result: 'invalid_signature' });
+      throw new UnauthorizedException('Invalid HubSpot signature');
+    }
 
     const payload = hubspotWebhookPayloadSchema.safeParse(req.body);
     if (!payload.success) throw new BadRequestException(payload.error.flatten());

@@ -18,7 +18,9 @@ const envSchema = z.object({
   // Set when running behind a proxy so the webhook signature URI matches what HubSpot called.
   WEBHOOK_PUBLIC_BASE_URL: z.string().url().optional(),
   SYNC_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
-  SYNC_BATCH_SIZE: z.coerce.number().int().positive().default(10),
+  SYNC_BATCH_SIZE: z.coerce.number().int().positive().default(100),
+  // Claims with at least this many entities of one type use HubSpot batch APIs.
+  SYNC_BULK_THRESHOLD: z.coerce.number().int().positive().default(10),
   SYNC_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
   DEV_ENDPOINTS_ENABLED: bool.default('false'),
 });
