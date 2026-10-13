@@ -41,7 +41,10 @@
       "gridPos": { "x": 6, "y": 1, "w": 6, "h": 5 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{ "refId": "A", "expr": "sum(cdm_sync_entities{status=\"pending\"})" }],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } },
+        "overrides": []
+      },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
     },
     {
@@ -71,7 +74,10 @@
       "gridPos": { "x": 18, "y": 1, "w": 6, "h": 5 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{ "refId": "A", "expr": "sum(cdm_sync_entities{status=\"synced\"})" }],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "green" } },
+        "overrides": []
+      },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
     },
     {

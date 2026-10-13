@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { z } from 'zod';
 import { affiliateDataSchema, dealDataSchema } from '../contracts/events';
+import { otelSdk } from '../observability/otel';
 import { ENTITY_TYPES, SYNC_STATUSES } from '../persistence/sync-state.repository';
 
 /**
@@ -120,3 +121,8 @@ server
     console.error(err);
     process.exit(1);
   });
+
+// Agent sessions can be short: flush tool-call spans when the client disconnects.
+process.stdin.on('end', () => {
+  void (otelSdk?.shutdown() ?? Promise.resolve()).finally(() => process.exit(0));
+});

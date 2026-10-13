@@ -2,6 +2,8 @@
 
 Bridge between Legend services and HubSpot CRM. Built with **NestJS 11 / TypeScript / Node 24 / Kafka / PostgreSQL / HubSpot CRM API**, plus an **MCP server** so AI agents can operate the integration.
 
+![CDM Grafana dashboard: sync lag SLI, backlog, Kafka ingestion and HubSpot sync results](docs/screenshots/grafana-slis-and-sync.png)
+
 ```mermaid
 flowchart LR
   subgraph Legend services
@@ -234,6 +236,22 @@ Trigger a backfill with `POST /sync/resync` (body `{"entityType": "affiliate"}`,
 - **Dashboard:** [observability/grafana/dashboards/cdm-overview.json](observability/grafana/dashboards/cdm-overview.json), provisioned automatically.
 
 The SLI is **sync lag**: the age of the oldest change not yet in HubSpot. Alerting on it catches HubSpot outages, rate-limit storms and stuck workers with one rule.
+
+### Dashboard
+
+These screenshots were taken with the `demo` profile running.
+
+**SLIs and the Kafka -> CDM -> HubSpot flow.** Sync lag, pending/failed/synced counts, ingestion by topic and result (including dropped duplicates), and sync results split into single vs bulk mode.
+
+![SLIs, Kafka ingestion and HubSpot sync results](docs/screenshots/grafana-slis-and-sync.png)
+
+**Backlog and HubSpot API health.** A seeded burst of about 150 entities shows up as a backlog spike that drains through batches of 40-80 records. HubSpot requests, p95 latency and errors are broken down by operation and status (404 / 409 / 429).
+
+![Sync backlog, bulk batch size and HubSpot API metrics](docs/screenshots/grafana-backlog-and-hubspot-api.png)
+
+**HubSpot -> CDM -> Kafka and correlated logs.** Signed webhooks (applied vs invalid_signature), outbox messages published to Kafka, and live logs from Loki. Each log line links to its trace in Tempo.
+
+![Webhooks, outbox and live logs](docs/screenshots/grafana-webhooks-and-logs.png)
 
 ## Real HubSpot
 
