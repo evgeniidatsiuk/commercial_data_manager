@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "commercial-data-manager": {
+      "type": "stdio",
+      "command": "docker",
+      "args": ["compose", "-f", "${workspaceFolder}/docker-compose.yml", "exec", "-T", "cdm", "node", "dist/mcp/main.js"]
+    }
+  }
+}

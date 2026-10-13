@@ -1,0 +1,95 @@
+name: cdm
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: cdm
+      POSTGRES_PASSWORD: cdm
+      POSTGRES_DB: cdm
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cdm -d cdm"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports: ["29092:29092"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 15s
+      retries: 30
+      start_period: 10s
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports: ["8080:8080"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  hubspot-mock:
+    image: node:24-alpine
+    working_dir: /app
+    command: ["node", "server.ts"]
+    volumes:
+      - ./tools/hubspot-mock:/app:ro
+    environment:
+      PORT: 4010
+      WEBHOOK_TARGET_URL: http://cdm:3000/webhooks/hubspot
+      HUBSPOT_CLIENT_SECRET: mock-client-secret
+      MOCK_RATE_LIMIT_PERCENT: ${MOCK_RATE_LIMIT_PERCENT:-0}
+    ports: ["4010:4010"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4010/__mock/health > /dev/null || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  cdm:
+    build: .
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://cdm:cdm@postgres:5432/cdm
+      KAFKA_BROKERS: kafka:9092
+      # Point at real HubSpot by setting these in .env (see .env.example).
+      HUBSPOT_BASE_URL: ${HUBSPOT_BASE_URL:-http://hubspot-mock:4010}
+      HUBSPOT_ACCESS_TOKEN: ${HUBSPOT_ACCESS_TOKEN:-mock-token}
+      HUBSPOT_CLIENT_SECRET: ${HUBSPOT_CLIENT_SECRET:-mock-client-secret}
+      DEV_ENDPOINTS_ENABLED: "true"
+    ports: ["3000:3000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      hubspot-mock:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health > /dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 5s
