@@ -107,3 +107,18 @@ services:
     volumes:
       - ./observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/cdm.yaml:ro
       - ./observability/grafana/dashboards:/otel-lgtm/cdm-dashboards:ro
+
+  # Simulated Legend services + sales reps. Opt-in: docker compose --profile demo up -d
+  demo-traffic:
+    profiles: [demo]
+    image: node:24-alpine
+    working_dir: /app
+    command: ["node", "run.ts"]
+    volumes:
+      - ./tools/demo-traffic:/app:ro
+    environment:
+      CDM_URL: http://cdm:3000
+      HUBSPOT_MOCK_URL: http://hubspot-mock:4010
+    depends_on:
+      cdm:
+        condition: service_healthy

@@ -3,7 +3,7 @@
     "commercial-data-manager": {
       "type": "stdio",
       "command": "docker",
-      "args": ["compose", "-f", "${workspaceFolder}/docker-compose.yml", "exec", "-T", "cdm", "node", "dist/mcp/main.js"]
+      "args": ["compose", "-f", "${workspaceFolder}/docker-compose.yml", "exec", "-T", "-e", "OTEL_SERVICE_NAME=cdm-mcp", "cdm", "node", "dist/mcp/main.js"]
     }
   }
 }
