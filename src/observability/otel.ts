@@ -22,7 +22,7 @@ export const otelSdk = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
       metricReaders: [
         new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter(), exportIntervalMillis: 5_000 }),
       ],
-      logRecordProcessors: [new BatchLogRecordProcessor(new OTLPLogExporter())],
+      logRecordProcessors: [new BatchLogRecordProcessor({ exporter: new OTLPLogExporter() })],
       instrumentations: [
         new HttpInstrumentation({ ignoreIncomingRequestHook: (req) => req.url === '/health' }),
         new ExpressInstrumentation(),
