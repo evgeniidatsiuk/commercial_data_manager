@@ -26,6 +26,14 @@ export interface ClaimedJob {
   attempts: number;
 }
 
+export interface SyncStats {
+  totals: Record<SyncStatus, number>;
+  byEntityType: Record<EntityType, Record<SyncStatus, number>>;
+  lagSeconds: number;
+}
+
+const emptyCounts = (): Record<SyncStatus, number> => ({ pending: 0, synced: 0, failed: 0 });
+
 const COLUMNS = `
   entity_type AS "entityType", entity_id AS "entityId", status,
   desired_version::int AS "desiredVersion", synced_version::int AS "syncedVersion", attempts,
@@ -41,9 +49,43 @@ export class SyncStateRepository {
       `INSERT INTO sync_state (entity_type, entity_id) VALUES ($1, $2)
        ON CONFLICT (entity_type, entity_id) DO UPDATE SET
          desired_version = sync_state.desired_version + 1,
+         requested_at = CASE WHEN sync_state.status = 'pending' THEN sync_state.requested_at ELSE now() END,
          status = 'pending', attempts = 0, next_attempt_at = now(), last_error = NULL, updated_at = now()`,
       [entityType, entityId],
     );
+  }
+
+  /** Backfill: re-push every entity (optionally of one type) to HubSpot. */
+  async resync(entityType: EntityType | undefined): Promise<number> {
+    const rows = await this.db.query(
+      `UPDATE sync_state SET
+         desired_version = desired_version + 1,
+         requested_at = CASE WHEN status = 'pending' THEN requested_at ELSE now() END,
+         status = 'pending', attempts = 0, next_attempt_at = now(), last_error = NULL, updated_at = now()
+       WHERE $1::text IS NULL OR entity_type = $1
+       RETURNING entity_id`,
+      [entityType ?? null],
+    );
+    return rows.length;
+  }
+
+  async stats(): Promise<SyncStats> {
+    const rows = await this.db.query<{ entityType: EntityType; status: SyncStatus; count: number; oldest: number }>(
+      `SELECT entity_type AS "entityType", status, count(*)::int AS count,
+              EXTRACT(EPOCH FROM now() - min(requested_at))::float8 AS oldest
+       FROM sync_state GROUP BY entity_type, status`,
+    );
+    const stats: SyncStats = {
+      totals: emptyCounts(),
+      byEntityType: { affiliate: emptyCounts(), deal: emptyCounts() },
+      lagSeconds: 0,
+    };
+    for (const r of rows) {
+      stats.totals[r.status] += r.count;
+      stats.byEntityType[r.entityType][r.status] = r.count;
+      if (r.status === 'pending') stats.lagSeconds = Math.max(stats.lagSeconds, r.oldest);
+    }
+    return stats;
   }
 
   /** Leases due jobs; an expired lease (crashed worker) makes the job claimable again. */
@@ -93,7 +135,7 @@ export class SyncStateRepository {
 
   async retry(entityType: EntityType, entityId: string): Promise<boolean> {
     const rows = await this.db.query(
-      `UPDATE sync_state SET status = 'pending', attempts = 0, next_attempt_at = now(), updated_at = now()
+      `UPDATE sync_state SET status = 'pending', attempts = 0, next_attempt_at = now(), requested_at = now(), updated_at = now()
        WHERE entity_type = $1 AND entity_id = $2 AND status = 'failed'
        RETURNING entity_id`,
       [entityType, entityId],

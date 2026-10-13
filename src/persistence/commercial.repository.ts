@@ -117,6 +117,38 @@ export class CommercialRepository {
     await this.db.query('UPDATE deals SET hubspot_deal_id = $2 WHERE deal_id = $1', [dealId, hubspotDealId]);
   }
 
+  getAffiliates(ids: string[]): Promise<Affiliate[]> {
+    return this.db.query<Affiliate>(`SELECT ${AFFILIATE_COLUMNS} FROM affiliates WHERE affiliate_id = ANY($1)`, [ids]);
+  }
+
+  getDeals(ids: string[]): Promise<Deal[]> {
+    return this.db.query<Deal>(`SELECT ${DEAL_COLUMNS} FROM deals WHERE deal_id = ANY($1)`, [ids]);
+  }
+
+  async setAffiliateHubSpotIdsBulk(
+    rows: Array<{ affiliateId: string; companyId: string | null; contactId: string | null }>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    await this.db.query(
+      `UPDATE affiliates a
+       SET hubspot_company_id = COALESCE(v.company_id, a.hubspot_company_id),
+           hubspot_contact_id = COALESCE(v.contact_id, a.hubspot_contact_id)
+       FROM unnest($1::text[], $2::text[], $3::text[]) AS v(affiliate_id, company_id, contact_id)
+       WHERE a.affiliate_id = v.affiliate_id`,
+      [rows.map((r) => r.affiliateId), rows.map((r) => r.companyId), rows.map((r) => r.contactId)],
+    );
+  }
+
+  async setDealHubSpotIdsBulk(rows: Array<{ dealId: string; hubspotDealId: string }>): Promise<void> {
+    if (rows.length === 0) return;
+    await this.db.query(
+      `UPDATE deals d SET hubspot_deal_id = v.hubspot_deal_id
+       FROM unnest($1::text[], $2::text[]) AS v(deal_id, hubspot_deal_id)
+       WHERE d.deal_id = v.deal_id`,
+      [rows.map((r) => r.dealId), rows.map((r) => r.hubspotDealId)],
+    );
+  }
+
   async setStageByHubSpotId(tx: Queryable, hubspotDealId: string, stage: string): Promise<Deal | null> {
     const [row] = await tx.query<Deal>(
       `UPDATE deals SET hubspot_stage = $2, updated_at = now()
