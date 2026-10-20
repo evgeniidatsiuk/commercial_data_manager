@@ -1,18 +1,18 @@
 # Commercial Data Manager (PoC)
 
-Bridge between Legend services and HubSpot CRM. Built with **NestJS 11 / TypeScript / Node 24 / Kafka / PostgreSQL / HubSpot CRM API**, plus an **MCP server** so AI agents can operate the integration.
+Bridge between MarketingAPI services and HubSpot CRM. Built with **NestJS 11 / TypeScript / Node 24 / Kafka / PostgreSQL / HubSpot CRM API**, plus an **MCP server** so AI agents can operate the integration.
 
 ![CDM Grafana dashboard: sync lag SLI, backlog, Kafka ingestion and HubSpot sync results](docs/screenshots/grafana-slis-and-sync.png)
 
 ```mermaid
 flowchart LR
-  subgraph Legend services
+  subgraph MarketingAPI services
     AP[Affiliate platform]
     DS[Deals service]
     OT[Other consumers]
   end
-  AP -- legend.affiliates.v1 --> K[(Kafka)]
-  DS -- legend.deals.v1 --> K
+  AP -- MarketingAPI.affiliates.v1 --> K[(Kafka)]
+  DS -- MarketingAPI.deals.v1 --> K
   K --> IC[IngestionConsumer]
   IC -- "inbox + projection + sync request (1 tx)" --> PG[(Postgres)]
   PG --> SW[SyncWorker] -- "CRM v3/v4 API" --> HS[HubSpot]
@@ -24,7 +24,7 @@ flowchart LR
 
 ## How it works
 
-### 1. Legend → HubSpot (outbound sync)
+### 1. MarketingAPI → HubSpot (outbound sync)
 
 ```mermaid
 sequenceDiagram
@@ -55,7 +55,7 @@ sequenceDiagram
     SW->>PG: claim due rows (FOR UPDATE SKIP LOCKED, 60 s lease)
   end
   SW->>PG: load latest affiliate state
-  SW->>HS: find-or-create company by legend_affiliate_id
+  SW->>HS: find-or-create company by MarketingAPI_affiliate_id
   SW->>PG: save hubspot_company_id
   SW->>HS: find-or-create contact by email
   SW->>PG: save hubspot_contact_id
@@ -71,7 +71,7 @@ sequenceDiagram
 
 Deals follow the same path. The worker waits (retryable error) until the affiliate's HubSpot company exists, then creates the deal in the default pipeline and associates it with the company.
 
-### 2. HubSpot → Legend (inbound changes)
+### 2. HubSpot → MarketingAPI (inbound changes)
 
 ```mermaid
 sequenceDiagram
@@ -82,7 +82,7 @@ sequenceDiagram
   participant PG as Postgres
   participant OR as OutboxRelay
   participant K as Kafka
-  participant C as Legend consumers
+  participant C as MarketingAPI consumers
 
   Rep->>HS: move deal to closedwon
   HS->>WC: POST /webhooks/hubspot with X-HubSpot-Signature-v3
@@ -152,7 +152,7 @@ npm ci && npm run test:e2e              # full round-trip test against the runni
 docker compose --profile demo up -d --build --wait
 ```
 
-The `demo` profile adds [tools/demo-traffic](tools/demo-traffic/run.ts). It seeds 200 affiliates + 400 deals once, then keeps simulating Legend services and sales reps:
+The `demo` profile adds [tools/demo-traffic](tools/demo-traffic/run.ts). It seeds 200 affiliates + 400 deals once, then keeps simulating MarketingAPI services and sales reps:
 
 - every 3 s: a new affiliate and 2 deals, sometimes a tier upgrade or a HubSpot deal-stage change (signed webhook)
 - every 90 s: a burst of 120 affiliates, which switches the worker to the bulk (batch API) path
@@ -164,7 +164,7 @@ Open these and just observe:
 | Business dashboard | [localhost:3001/d/cdm-overview](http://localhost:3001/d/cdm-overview) | Sync lag SLI, backlog, single vs bulk results, HubSpot latency / 429s, webhooks, live logs |
 | Distributed traces | Grafana -> Explore -> **Tempo** -> Search, service `commercial-data-manager` | `POST /dev/events/affiliate` -> Kafka produce -> consume -> Postgres; `bulk sync deal` -> HubSpot batch calls |
 | Logs <-> traces | Grafana -> Explore -> **Loki**, `{service_name="commercial-data-manager"}` | Click a log's `trace_id` to jump to its trace |
-| Kafka topics | [localhost:8080](http://localhost:8080) | `legend.affiliates.v1`, `legend.deals.v1`, `cdm.hubspot-changes.v1` (stage changes), `cdm.dead-letter.v1` |
+| Kafka topics | [localhost:8080](http://localhost:8080) | `MarketingAPI.affiliates.v1`, `MarketingAPI.deals.v1`, `cdm.hubspot-changes.v1` (stage changes), `cdm.dead-letter.v1` |
 | "HubSpot" | [localhost:4010/__mock/stats](http://localhost:4010/__mock/stats), [/__mock/state](http://localhost:4010/__mock/state) | API calls per endpoint, records and associations |
 | CDM API | [localhost:3000/sync/stats](http://localhost:3000/sync/stats), `/affiliates/demo-aff-1`, `/deals/demo-deal-1` | Projection, HubSpot IDs, sync state |
 | Generator log | `docker compose logs -f demo-traffic` | What is being simulated right now |
@@ -219,8 +219,8 @@ The worker claims up to `SYNC_BATCH_SIZE` (100) due entities per tick and picks 
 
 | Entity | Batch calls per 100 records | Why |
 | --- | --- | --- |
-| Affiliate | `companies/batch/upsert` (by `legend_affiliate_id`), `contacts/batch/upsert` (by `email`), `associations/contacts/companies/batch/associate/default` | No create-only fields, so upsert is safe |
-| Deal | `deals/batch/read` (by `legend_deal_id`), `deals/batch/create` + `deals/batch/update`, `associations/deals/companies/batch/associate/default` | `dealstage` is owned by sales, so it is set only on create. Upsert would overwrite it |
+| Affiliate | `companies/batch/upsert` (by `MarketingAPI_affiliate_id`), `contacts/batch/upsert` (by `email`), `associations/contacts/companies/batch/associate/default` | No create-only fields, so upsert is safe |
+| Deal | `deals/batch/read` (by `MarketingAPI_deal_id`), `deals/batch/create` + `deals/batch/update`, `associations/deals/companies/batch/associate/default` | `dealstage` is owned by sales, so it is set only on create. Upsert would overwrite it |
 
 Partial failures (HTTP 207) are mapped back per record, and only failed records are retried. Batch reads and upserts by unique property are strongly consistent, unlike search, so the bulk path also heals stale mappings (records deleted in HubSpot).
 
@@ -255,7 +255,7 @@ These screenshots were taken with the `demo` profile running.
 
 ## Real HubSpot
 
-Copy `.env.example` to `.env`, then set a private-app token and client secret. After that, run `docker compose up -d --build cdm`. On startup, CDM creates its custom properties (`legend_affiliate_id`, `legend_deal_id`, etc.). To receive webhooks, expose `/webhooks/hubspot` (e.g. with ngrok), set `WEBHOOK_PUBLIC_BASE_URL`, and subscribe to `deal.propertyChange` for `dealstage`.
+Copy `.env.example` to `.env`, then set a private-app token and client secret. After that, run `docker compose up -d --build cdm`. On startup, CDM creates its custom properties (`MarketingAPI_affiliate_id`, `MarketingAPI_deal_id`, etc.). To receive webhooks, expose `/webhooks/hubspot` (e.g. with ngrok), set `WEBHOOK_PUBLIC_BASE_URL`, and subscribe to `deal.propertyChange` for `dealstage`.
 
 ## Agentic AI (MCP)
 
@@ -284,10 +284,10 @@ sequenceDiagram
 
   A->>M: publish_affiliate_event(affiliateId, companyName, contact, tier)
   M->>API: POST /dev/events/affiliate (schema-validated)
-  API->>S: produce legend.affiliates.v1
+  API->>S: produce MarketingAPI.affiliates.v1
   A->>M: publish_deal_event(dealId, affiliateId, REVSHARE, amount)
   M->>API: POST /dev/events/deal
-  API->>S: produce legend.deals.v1
+  API->>S: produce MarketingAPI.deals.v1
   S->>HS: async sync (company, contact, deal, associations)
 
   loop until synced or failed
@@ -332,8 +332,8 @@ The agent never touches Kafka, Postgres or HubSpot directly. It only uses the sa
 | Out-of-order events | Upserts are guarded by `source_occurred_at`, so stale events are ignored. Kafka key = entity ID keeps per-entity ordering |
 | HubSpot rate limits / outages | Ingestion is **decoupled** from HubSpot. `sync_state` is a desired-state reconciliation table (`desired_version` vs `synced_version`). Bursts of updates coalesce into a single API call. Retries use in-process handling for 429/5xx plus worker exponential backoff, and a job is marked `failed` after N attempts |
 | Horizontal scaling | `FOR UPDATE SKIP LOCKED` plus a lease (`locked_until`), so multiple replicas never sync the same entity at once |
-| Duplicate HubSpot records | Find-or-create by external ID: local mapping first (HubSpot search is eventually consistent), then search, then create. The `legend_*_id` properties are unique in HubSpot |
-| Field ownership | Legend owns commercial terms. The sales team owns `dealstage` in HubSpot, so CDM sets it only when creating a deal |
+| Duplicate HubSpot records | Find-or-create by external ID: local mapping first (HubSpot search is eventually consistent), then search, then create. The `MarketingAPI_*_id` properties are unique in HubSpot |
+| Field ownership | MarketingAPI owns commercial terms. The sales team owns `dealstage` in HubSpot, so CDM sets it only when creating a deal |
 | Publishing back to Kafka | **Transactional outbox** + relay, so a webhook is never acknowledged without its event being persisted |
 | Webhook security | HubSpot signature v3 (HMAC-SHA256, constant-time compare, 5-minute replay window) |
 | Poison messages | Schema validation (zod), with a DLQ topic so a bad message never blocks a partition |
